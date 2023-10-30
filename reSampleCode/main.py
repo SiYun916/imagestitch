@@ -1,7 +1,62 @@
 import numpy as np
 import cv2
 import argparse
+# 全局变量，图像A只做一次gamma变换，否则会出现warp后的图像一直进行gamma变换
+imageAGammaCount=0
+# 同上，图像A只做一次自适应的直方图均衡
+imageAEqualCount=0
+# 同上，图像A只做一次畸变矫正
+imageADisCorCount=0
+#######################################
+###############对图像的简单处理
+#######################################
+# 彩色图像R、G、B三通道均衡化（全局直方图均衡化）
+# 效果不好，暂时都先别用
+def RGBEqualize(image):
+    (b, g, r) = cv2.split(image)
+    equal_b = cv2.equalizeHist(b)
+    equal_g = cv2.equalizeHist(g)
+    equal_r = cv2.equalizeHist(r)
+    result = cv2.merge((equal_b, equal_g, equal_r))
+    return result
+#  自适应彩色图像直方图均衡
+def adaptiveHisEqual(image):
+    # 转化到ycrcb空间
+    ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCR_CB)
+    # 通道分离
+    channels = cv2.split(ycrcb)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe.apply(channels[0], channels[0])
+    cv2.merge(channels, ycrcb)
+    cv2.cvtColor(ycrcb, cv2.COLOR_YCR_CB2BGR, image)
+    return image
+# 伽马变换
+# 大于1调亮，低于1调暗
+# opencv默认imread读取的图像的格式是BGR
+# 目前只是针对第二张及其之后的图像进行调整，无法为每个拼接进行调整
+def gammaAdjust(image,gamma=1.0):
+    imagef = image.astype(np.float32)/255
+    result = (np.power(imagef, 1/gamma)*255).astype(np.uint8)
+    return result
+# 畸变矫正
+def distortionCor(image,camMat,distCoeffs):
+    h, w = image.shape[:2]
+    K = np.zeros((3, 3))
+    K[0, 0] = camMat[0]
+    K[1, 1] = camMat[1]
+    K[0, 2] = camMat[2]
+    K[1, 2] = camMat[3]
+    K[2, 2] = 1
+    distCoeffs = np.float32(distCoeffs)
+    retval, validPixROI	= cv2.getOptimalNewCameraMatrix(cameraMatrix=K,distCoeffs=distCoeffs,imageSize=(h,w),alpha=0)
+    src = image
+    dst = cv2.undistort(src=src, cameraMatrix=K, distCoeffs=distCoeffs,newCameraMatrix=retval)
+    return dst
 
+
+#######################################
+###############图像拼接流程
+#######################################
 def detectAndDescribe(image,kpsAlgorithm=0):
     # SIFT特征点提取
     # 参数列表 （不全）
@@ -16,6 +71,8 @@ def detectAndDescribe(image,kpsAlgorithm=0):
         descriptor = cv2.xfeatures2d.SIFT_create(nfeatures=500)
     elif kpsAlgorithm==2:
         descriptor = cv2.ORB_create()
+    elif kpsAlgorithm==3:
+        descriptor = cv2.BRISK_create()
     # 检测特征点 并计算描述子
     # kps为关键点列表 其中的信息其实很多 比如angle,pt,size等等
     (kps, features) = descriptor.detectAndCompute(image, None)
@@ -107,10 +164,37 @@ def correct_H(H,w,h):
 
 # 先将第一张图片变换到第二张图片的坐标系下，保存仿射变换后的图像
 # 第一次提取默认使用SURF算法
-def stitchImage(imageAPath,imageBPath,imageSavePath='.\\result.png',kpsAlgorithm=2 ,ratio=0.75, reprojThresh=4.0 ,warpedSize=2.0):
+def stitchImage(imageAPath,imageBPath,imageSavePath='.\\result.png',
+                kpsAlgorithm=0 ,ratio=0.75, reprojThresh=4.0 ,warpedSize=2.0,
+                gammaAlgorithm=0,gamma=1.0,
+                adaptiveEqual=0,
+                distorCorrect=0,
+                camMat=[1.46489094e+03,1.46358621e+03,3.53922761e+02,2.07792630e+02],
+                distCoeffs=[-1.11169695e-01 ,1.34520353e+01,1.12320430e-02,7.68615307e-02,0]):
     # 读取两张待拼接的两张图片
     imageA = cv2.imread(imageAPath)
     imageB = cv2.imread(imageBPath)
+    # 是否进行gamma变换
+    global imageAGammaCount
+    if gammaAlgorithm:
+        if imageAGammaCount < 1:
+            imageAGammaCount += 1
+            imageA = gammaAdjust(imageA,gamma)
+        imageB = gammaAdjust(imageB,gamma)
+    # 是否进行自适应直方图均衡
+    global imageAEqualCount
+    if adaptiveEqual:
+        if imageAEqualCount < 1:
+            imageAEqualCount += 1
+            imageA = adaptiveHisEqual(imageA)
+        imageB = adaptiveHisEqual(imageB)
+    # 畸变矫正
+    global  imageADisCorCount
+    if distorCorrect:
+        if imageADisCorCount < 1:
+            imageADisCorCount += 1
+            imageA = distortionCor(imageA,camMat,distCoeffs)
+        imageB = distortionCor(imageB,camMat, distCoeffs)
     # 这里的情况只考虑两张拼接图像是相同size的
     h,w,c = imageA.shape
     # 通过detectAndDescribe函数得到关键点（这里的kpsA B是坐标）及其对应的descriptors描述子(featuresA B其实这里不应该写成特征的)
@@ -127,17 +211,65 @@ def stitchImage(imageAPath,imageBPath,imageSavePath='.\\result.png',kpsAlgorithm
     (H, moveX, moveY) = correct_H(H,w,h)
     # 图像变换，这里选用两个图片长宽相加，是因为考虑到多张图片拼接的情况，过程中有裁剪会导致图像大小变得不一样
     result = cv2.warpPerspective(imageA, H, (imageA.shape[1] + int(warpedSize*imageB.shape[1]), imageA.shape[0] + int(warpedSize*imageB.shape[0])))
-    # 下面是调整
+    # 下面是调整,和去除拼接边界的缝隙。思路是直接拷贝warp后的图的边界3像素区域放到最终图上
     # 如果x,y都是负的 都需要平移 那么imageB也跟着平移
     # 其中一个是正的 另一个为负  只移动一个方向即可
     if moveX < 0 and moveY < 0:
+        # 拷贝边界，右下平移后要考虑四个边界
+        picrow1 = np.copy(result[abs(moveY):abs(moveY)+imageB.shape[0], abs(moveX)-1:abs(moveX)+1])
+        picrow2 = np.copy(result[abs(moveY):abs(moveY)+imageB.shape[0], abs(moveX)+imageB.shape[1]-1:abs(moveX)+imageB.shape[1]+1])
+        piccol1 = np.copy(result[abs(moveY)-1:abs(moveY)+1, abs(moveX):abs(moveX)+imageB.shape[1]])
+        piccol2 = np.copy(result[abs(moveY)+imageB.shape[0]-1:abs(moveY)+imageB.shape[0]+1, abs(moveX):abs(moveX)+imageB.shape[1]])
+        # 直接拷贝imageB
         result[abs(moveY):abs(moveY)+imageB.shape[0], abs(moveX):abs(moveX)+imageB.shape[1]] = imageB
+        # 拷贝边界至结果
+        result[abs(moveY):abs(moveY)+imageB.shape[0], abs(moveX)-1:abs(moveX)+1] = picrow1
+        result[abs(moveY):abs(moveY)+imageB.shape[0],abs(moveX)+imageB.shape[1]-1:abs(moveX)+imageB.shape[1]+1] = picrow2
+        result[abs(moveY)-1:abs(moveY)+1, abs(moveX):abs(moveX)+imageB.shape[1]] = piccol1
+        result[abs(moveY)+imageB.shape[0]-1:abs(moveY)+imageB.shape[0]+1,abs(moveX):abs(moveX)+imageB.shape[1]] = piccol2
     elif moveX < 0 and moveY > 0:
+        # 向右平移，考虑左右边界和下边界
+        picrow1 = np.copy(result[0:imageB.shape[0],abs(moveX)-1:abs(moveX)+1])
+        picrow2 = np.copy(result[0:imageB.shape[0],imageB.shape[1]+abs(moveX)-1:imageB.shape[1]+abs(moveX)+1])
+        piccol = np.copy(result[imageB.shape[0]-1:imageB.shape[0]+1,abs(moveX):abs(moveX)+imageB.shape[1]])
         result[0:0 + imageB.shape[0], abs(moveX):abs(moveX) + imageB.shape[1]] = imageB
+        result[0:imageB.shape[0], abs(moveX) - 1:abs(moveX) + 1] = picrow1
+        result[0:imageB.shape[0], imageB.shape[1] + abs(moveX) - 1:imageB.shape[1] + abs(moveX) + 1] = picrow2
+        result[imageB.shape[0] - 1:imageB.shape[0] + 1, abs(moveX):abs(moveX) + imageB.shape[1]] = piccol
+
     elif moveX > 0 and moveY < 0:
+        # 直接深拷贝重叠的边界，替换掉缝隙
+        # 向下平移考虑上下边界和右边界
+        picrow = np.copy(result[abs(moveY):abs(moveY)+imageB.shape[0],imageB.shape[1]-1:imageB.shape[1]+1])
+        piccol1 = np.copy(result[abs(moveY)-1:abs(moveY)+1,0:imageB.shape[1]])
+        piccol2 = np.copy(result[imageB.shape[0]+abs(moveY)-1:imageB.shape[0]+abs(moveY)+1,0:imageB.shape[1]])
         result[abs(moveY):abs(moveY) + imageB.shape[0], 0:0 + imageB.shape[1]] = imageB
+        result[abs(moveY):abs(moveY)+imageB.shape[0], imageB.shape[1]-1:imageB.shape[1]+1] = picrow
+        result[abs(moveY)-1:abs(moveY)+1,0:imageB.shape[1]] = piccol1
+        result[imageB.shape[0] + abs(moveY) - 1:imageB.shape[0] + abs(moveY) + 1, 0:imageB.shape[1]] = piccol2
+        # 先深拷贝重叠的边界，重点在找好边界值
+        # seemrowMax = max_tmp_row
+        # seemcolMin = min_tmp_col
+        # for row in range(abs(moveY),max_tmp_row):
+        #     if result[row,imageB.shape[1]+5,0]==0 or result[row,imageB.shape[1]-5,0]==0:
+        #         seemrowMax=row
+        #         break
+        # for col in reversed(range(min_tmp_col,imageB.shape[1])):
+        #     if result[abs(moveY)-5,col,0]==0 or result[abs(moveY)+5,col,0]==0:
+        #         seemcolMin=col
+        #         break
+        #picrow = np.copy(result[abs(moveY):seemrowMax, imageB.shape[1] - 5:imageB.shape[1] + 5])
+        #piccol = np.copy(result[abs(moveY)-5:abs(moveY)+5, seemcolMin:imageB.shape[1]])
+        #result[abs(moveY):abs(moveY) + imageB.shape[0], 0:0 + imageB.shape[1]] = imageB
+        #result[abs(moveY):seemrowMax, imageB.shape[1] - 5:imageB.shape[1] + 5] = picrow
+        #result[abs(moveY)-5:abs(moveY)+5, seemcolMin:imageB.shape[1]] = piccol
     else:
+        # 不用平移，考虑右边界和下边界即可
+        picrow = np.copy(result[0:imageB.shape[0],imageB.shape[1]-1:imageB.shape[1]+1])
+        piccol = np.copy(result[imageB.shape[0]-1:imageB.shape[1]+1,0:imageB.shape[1]])
         result[0:imageB.shape[0], 0:imageB.shape[1]] = imageB
+        result[0:imageB.shape[0], imageB.shape[1] - 1:imageB.shape[1] + 1] = picrow
+        result[imageB.shape[0] - 1:imageB.shape[1] + 1, 0:imageB.shape[1]] = piccol
     # 裁剪黑边
     rows, cols = np.where(result[:, :, 0] != 0)
     min_row, max_row = min(rows), max(rows) + 1
@@ -149,12 +281,14 @@ def stitchImage(imageAPath,imageBPath,imageSavePath='.\\result.png',kpsAlgorithm
 # 默认用SURF算法
 if __name__ == '__main__':
     #文件路径
+    # testImage1Path = "./data/Vis640/test1/1.jpg"
+    # testImage2Path = "./data/Vis640/test1/2.jpg"
     # testImage1Path = "./data/Vis4096/test2/1.jpg"
     # testImage2Path = "./data/Vis4096/test2/2.jpg"
     # testImage3Path = "./data/Vis4096/test2/3.jpg"
     # testImage4Path = "./data/Vis2048/test3/4.jpg"
-    # stitchImage(testImage1Path,testImage2Path,interImageSavePath='.\\transformed.png')
-    # stitchImage('.\\transformed.png', testImage3Path, interImageSavePath='.\\result.png')
+    # stitchImage(testImage1Path,testImage2Path,imageSavePath='.\\transformed.png')
+    # stitchImage('.\\transformed.png', testImage3Path, imageSavePath='.\\result.png')
     #stitch(testImage2Path, transformedImagePath='.\\transformed.png', resultImageSavePath=".\\result.png")
     # transformImage(".\\result.png", testImage3Path, interImageSavePath='.\\transformed.png')
     # stitch(testImage3Path, transformedImagePath='.\\transformed.png', resultImageSavePath=".\\result.png")
@@ -170,13 +304,27 @@ if __name__ == '__main__':
                         default=".\\result.png")
     parser.add_argument("--warpedSize", type=float, help="如果变换后的图片不完整，调整该参数",
                         default=2.0)
+    parser.add_argument("--gammaAlgorithm",type=int,help="是否进行gamma变换（全部），0->NO，1->YES",
+                        default=0)
+    parser.add_argument("--gamma",type=float,help="gamma变换的参数，大于1变亮",
+                        default=1.0)
+    parser.add_argument("--adaptiveEqual",type=int,help="是否进行自适应直方图均衡（全部），0->NO，1->YES",
+                        default=0)
+    parser.add_argument("--distorCorrect",type=int,help="是否进行畸变矫正（全部），0->NO，1->YES",
+                        default=0)
+    parser.add_argument("--camMat",type=float,nargs='+',help="相机的内参矩阵,以00,11,02,22的顺序",
+                        default=[1.46489094e+03,1.46358621e+03,3.53922761e+02,2.07792630e+02])
+    parser.add_argument("--distCoeffs",type=float,nargs='+',help="畸变参数",
+                        default=[-1.11169695e-01 ,1.34520353e+01,1.12320430e-02,7.68615307e-02,0])
     args = parser.parse_args()
     # 读取
     # 两张图片的情况
     if len(args.list) == 2:
         img1 = args.list[0]
         img2 = args.list[1]
-        stitchImage(img1,img2,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize)
+        stitchImage(img1,img2,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize,
+                    gammaAlgorithm=args.gammaAlgorithm,gamma=args.gamma,adaptiveEqual=args.adaptiveEqual,
+                    distorCorrect=args.distorCorrect,camMat=args.camMat,distCoeffs=args.distCoeffs)
     # 多张图片的情况
     elif len(args.list) > 2:
         imglist = []
@@ -185,8 +333,12 @@ if __name__ == '__main__':
         imgnums = len(imglist)
         img1 = imglist[0]
         img2 = imglist[1]
-        stitchImage(img1,img2,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize)
+        stitchImage(img1,img2,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize,
+                    gammaAlgorithm=args.gammaAlgorithm,gamma=args.gamma,adaptiveEqual=args.adaptiveEqual,
+                    distorCorrect=args.distorCorrect,camMat=args.camMat,distCoeffs=args.distCoeffs)
         for i in range(3, imgnums + 1):
             imgi = imglist[i - 1]
-            stitchImage(args.savepath,imgi,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize)
+            stitchImage(args.savepath,imgi,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize,
+                        gammaAlgorithm=args.gammaAlgorithm,gamma=args.gamma,adaptiveEqual=args.adaptiveEqual,
+                        distorCorrect=args.distorCorrect,camMat=args.camMat,distCoeffs=args.distCoeffs)
     ############################################
