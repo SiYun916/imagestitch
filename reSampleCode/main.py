@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import argparse
+import os
 # 全局变量，图像A只做一次gamma变换，否则会出现warp后的图像一直进行gamma变换
 imageAGammaCount=0
 # 同上，图像A只做一次自适应的直方图均衡
@@ -52,8 +53,27 @@ def distortionCor(image,camMat,distCoeffs):
     src = image
     dst = cv2.undistort(src=src, cameraMatrix=K, distCoeffs=distCoeffs,newCameraMatrix=retval)
     return dst
-
-
+#######################################
+###############添加左上角添加文字
+#######################################
+def addText(stitchedImage,pathList,savepath):
+    # 获取图片名称
+    imageNameList = []
+    for imagepath in pathList:
+        (path, imageName) = os.path.split(imagepath)
+        imageName = imageName[-8:]
+        imageNameList.append(imageName)
+    # 生成文字
+    text = "Stitched Images: "
+    for imagename in imageNameList:
+        text += imagename + " "
+    # 读取图片
+    image = cv2.imread(stitchedImage)
+    # 在上方添加黑色像素
+    image = cv2.copyMakeBorder(image, 75, 0, 0, 0, cv2.BORDER_CONSTANT, (0, 0, 0))
+    # 图片上加字
+    cv2.putText(image, text, (0, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 2)
+    cv2.imwrite(savepath,image)
 #######################################
 ###############图像拼接流程
 #######################################
@@ -277,6 +297,7 @@ def stitchImage(imageAPath,imageBPath,imageSavePath='.\\result.png',
     result = result[min_row:max_row, min_col:max_col, :]
     cv2.imwrite(imageSavePath, result)
 
+
 # 先不考虑拼接的顺序
 # 默认用SURF算法
 if __name__ == '__main__':
@@ -325,6 +346,7 @@ if __name__ == '__main__':
         stitchImage(img1,img2,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize,
                     gammaAlgorithm=args.gammaAlgorithm,gamma=args.gamma,adaptiveEqual=args.adaptiveEqual,
                     distorCorrect=args.distorCorrect,camMat=args.camMat,distCoeffs=args.distCoeffs)
+        addText(args.savepath,args.list,args.savepath)
     # 多张图片的情况
     elif len(args.list) > 2:
         imglist = []
@@ -341,4 +363,5 @@ if __name__ == '__main__':
             stitchImage(args.savepath,imgi,imageSavePath=args.savepath,kpsAlgorithm=args.kpsAlgorithm,warpedSize=args.warpedSize,
                         gammaAlgorithm=args.gammaAlgorithm,gamma=args.gamma,adaptiveEqual=args.adaptiveEqual,
                         distorCorrect=args.distorCorrect,camMat=args.camMat,distCoeffs=args.distCoeffs)
+        addText(args.savepath, args.list, args.savepath)
     ############################################
