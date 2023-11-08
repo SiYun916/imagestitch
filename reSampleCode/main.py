@@ -56,6 +56,15 @@ def distortionCor(image,camMat,distCoeffs):
 #######################################
 ###############添加左上角添加文字
 #######################################
+# 获取自适应的文字大小和文字高度
+def getOptimalFontScale(text, width):
+    for scale in reversed(range(0, 100, 1)):
+        textsize = cv2.getTextSize(text, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=scale/10, thickness=1)
+        newWidth = textsize[0][0]
+        newHeight = textsize[0][1]
+        if (newWidth <= width):
+            return (scale/10,newHeight)
+    return (1,75)
 def addText(stitchedImage,pathList,savepath):
     # 获取图片名称
     imageNameList = []
@@ -66,13 +75,17 @@ def addText(stitchedImage,pathList,savepath):
     # 生成文字
     text = "Stitched Images: "
     for imagename in imageNameList:
-        text += imagename + " "
+        (name, suffix) = os.path.splitext(imagename)
+        text += name + " "
     # 读取图片
     image = cv2.imread(stitchedImage)
+    # 获取自适应的字体
+    fontscale = 3 * (image.shape[1] // 5)
+    (fontSize, borderHeight) = getOptimalFontScale(text, fontscale)
     # 在上方添加黑色像素
-    image = cv2.copyMakeBorder(image, 75, 0, 0, 0, cv2.BORDER_CONSTANT, (0, 0, 0))
+    image = cv2.copyMakeBorder(image, borderHeight + 35, 0, 0, 0, cv2.BORDER_CONSTANT, (0, 0, 0))
     # 图片上加字
-    cv2.putText(image, text, (0, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 2)
+    cv2.putText(image, text, (0, borderHeight + 10), cv2.FONT_HERSHEY_SIMPLEX, fontSize, (0, 0, 255), 2)
     cv2.imwrite(savepath,image)
 #######################################
 ###############图像拼接流程
